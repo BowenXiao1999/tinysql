@@ -57,6 +57,7 @@ func (s *testSuite2) TestJoin(c *C) {
 		},
 		{
 			"select 1 from t as a join t as b on 1",
+			// "select 1 from t as a left join t as b on 0",
 			testkit.Rows("1"),
 		},
 	}

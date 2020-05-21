@@ -490,12 +490,90 @@ func NewRulePushSelDownAggregation() Transformation {
 	return rule
 }
 
+// Find a concrete example
+// select COUNT(*) as name_count from t group by name having name = "Tony" and age > 20 why not push? 
 // OnTransform implements Transformation interface.
 // It will transform `sel->agg->x` to `agg->sel->x` or `sel->agg->sel->x`
 // or just keep the selection unchanged.
+/*
+Aggregation 算子会涉及哪些列？group by 用到的列，以及聚合函数里面引用到的列。比如 select avg(a), sum(b) from t group by c d，这里面 group by 用到的 c 和 d 列，聚合函数用到的 a 和 b 列。所以这个 Aggregation 使用到的就是 a b c d 四列。
+*/
 func (r *PushSelDownAggregation) OnTransform(old *memo.ExprIter) (newExprs []*memo.GroupExpr, eraseOld bool, eraseAll bool, err error) {
+
 	// TODO: implement the algo according to the header comment.
-	return []*memo.GroupExpr{old.GetExpr()}, false, false, nil
+	sel := old.GetExpr().ExprNode.(*plannercore.LogicalSelection) // having clause
+
+	// sel->agg (children) 
+	agg := old.Children[0].GetExpr().ExprNode.(*plannercore.LogicalAggregation) // aggregation function
+
+	aggSchema := old.Children[0].Prop.Schema
+	var pushedExprs []expression.Expression
+	var remainedExprs []expression.Expression
+	exprsOriginal := make([]expression.Expression, 0, len(agg.AggFuncs))
+	for _, aggFunc := range agg.AggFuncs {
+		exprsOriginal = append(exprsOriginal, aggFunc.Args[0])
+	}
+
+	// the column included by groupby clause
+	groupByColumns := expression.NewSchema(agg.GetGroupByCols()...)
+
+	// 根据规则判断，当前Selection算子能不能push
+	for _, cond := range sel.Conditions { // 遍历当前有哪些Selection情况
+		switch cond.(type) {
+		case *expression.Constant:
+			// Consider SQL list "select sum(b) from t group by a having 1=0". "1=0" is a constant predicate which should be
+			// retained and pushed down at the same time. Because we will get a wrong query result that contains one column
+			// with value 0 rather than an empty query result.
+			pushedExprs = append(pushedExprs, cond)
+			remainedExprs = append(remainedExprs, cond)
+		case *expression.ScalarFunction:
+			extractedCols := expression.ExtractColumns(cond)
+			canPush := true
+			for _, col := range extractedCols {
+				if !groupByColumns.Contains(col) {
+					canPush = false
+					break
+				}
+			}
+			if canPush {
+				pushedExprs = append(pushedExprs, cond)
+			} else {
+				remainedExprs = append(remainedExprs, cond)
+			}
+		default:
+			remainedExprs = append(remainedExprs, cond)
+		}
+	}
+	// If no condition can be pushed, keep the selection unchanged.
+	if len(pushedExprs) == 0 {
+		return nil, false, false, nil
+	}
+	sctx := sel.SCtx()
+	childGroup := old.Children[0].GetExpr().Children[0]
+
+	// 新建Selection算子，并用memo进行Group包装
+	pushedSel := plannercore.LogicalSelection{Conditions: pushedExprs}.Init(sctx)
+	pushedGroupExpr := memo.NewGroupExpr(pushedSel)
+	pushedGroupExpr.SetChildren(childGroup)
+	pushedGroup := memo.NewGroupWithSchema(pushedGroupExpr, childGroup.Prop.Schema)
+
+	// 用memo包装新的agg算子
+	aggGroupExpr := memo.NewGroupExpr(agg)
+
+	// 连接agg和sel
+	aggGroupExpr.SetChildren(pushedGroup)
+
+	if len(remainedExprs) == 0 {
+		return []*memo.GroupExpr{aggGroupExpr}, true, false, nil
+	}
+
+	// 未下推的sel算子连接agg算子
+	// https://pingcap.com/blog-cn/tidb-cascades-planner/#memo
+	aggGroup := memo.NewGroupWithSchema(aggGroupExpr, aggSchema)
+	remainedSel := plannercore.LogicalSelection{Conditions: remainedExprs}.Init(sctx)
+	remainedGroupExpr := memo.NewGroupExpr(remainedSel)
+	remainedGroupExpr.SetChildren(aggGroup)
+	return []*memo.GroupExpr{remainedGroupExpr}, true, false, nil
 }
 
 // TransformLimitToTopN transforms Limit+Sort to TopN.
@@ -794,9 +872,46 @@ func (r *MergeAggregationProjection) Match(old *memo.ExprIter) bool {
 	return true
 }
 
+// tinysql
 // OnTransform implements Transformation interface.
 // It will transform `Aggregation->Projection->X` to `Aggregation->X`.
+// select count(e), count(f) as cnt from (select a as e, b as f, c as g, d as h from t) group by g, h (we need column substitute to find the corresponding col in Projection, Ex: groupby g-> c in t) 
 func (r *MergeAggregationProjection) OnTransform(old *memo.ExprIter) (newExprs []*memo.GroupExpr, eraseOld bool, eraseAll bool, err error) {
 	// TODO: implement the body according to the header comment.
-	return []*memo.GroupExpr{old.GetExpr()}, false, false, nil
+
+	oldAgg := old.GetExpr().ExprNode.(*plannercore.LogicalAggregation)
+	proj := old.Children[0].GetExpr().ExprNode.(*plannercore.LogicalProjection)
+	projSchema := old.Children[0].GetExpr().Schema()
+
+	// 1. new groupByItems
+	groupByItems := make([]expression.Expression, len(oldAgg.GroupByItems))
+	for i, item := range oldAgg.GroupByItems {
+		// substitute the correct column by column in projection.
+		// e.g. select * from (select b as a from t) k where a < 10 => select * from (select b as a from t where b < 10) k.
+		groupByItems[i] = expression.ColumnSubstitute(item, projSchema, proj.Exprs)
+	}
+
+	// 2. new aggFuncs
+	// aggFuncs不变，变的是里面的args
+	aggFuncs := make([]*aggregation.AggFuncDesc, len(oldAgg.AggFuncs))
+	for i, aggFunc := range oldAgg.AggFuncs {
+		aggFuncs[i] = aggFunc.Clone()
+		newArgs := make([]expression.Expression, len(aggFunc.Args))
+		for j, arg := range aggFunc.Args { // arg is column
+			// substitute the correct column by 
+			newArgs[j] = expression.ColumnSubstitute(arg, projSchema, proj.Exprs)
+		}
+		aggFuncs[i].Args = newArgs
+	}
+
+	// create a new agg function
+	newAgg := plannercore.LogicalAggregation{
+		GroupByItems: groupByItems,
+		AggFuncs:     aggFuncs,
+	}.Init(oldAgg.SCtx())
+	newAggExpr := memo.NewGroupExpr(newAgg) // wrap it with memo
+	newAggExpr.SetChildren(old.Children[0].GetExpr().Children...)
+
+	return []*memo.GroupExpr{newAggExpr}, false, false, nil
+	// return []*memo.GroupExpr{old.GetExpr()}, false, false, nil
 }

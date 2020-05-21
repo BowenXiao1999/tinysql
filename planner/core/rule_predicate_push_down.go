@@ -356,7 +356,54 @@ func (la *LogicalAggregation) PredicatePushDown(predicates []expression.Expressi
 	// TODO: Here you need to push the predicates across the aggregation.
 	//       A simple example is that `select * from (select count(*) from t group by b) tmp_t where b > 1` is the same with
 	//       `select * from (select count(*) from t where b > 1 group by b) tmp_t.
-	return predicates, la
+	// la *LogicalAggregation is logicalPlan interface
+	// var condsToPush []expression.Expression // store predicates to push down
+
+	// // exprsOriginal := make([]expression.Expression, 0, len(la.AggFuncs)) 
+	// // for _, v := range la.AggFuncs{ // the aggregation function of current plan
+	// // 	exprsOriginal = append(exprsOriginal, v.Args[0])
+	// // }
+
+	// // aggregation should look at group by columns
+	// columns := expression.NewSchema(la.groupByCols...)
+
+
+	// // based on the type of predicates (for loop predicates)
+	// // add suitable predicates to push down
+	// for _, pre := range predicates{
+	// 	switch v := pre.(type){
+	// 	case *expression.Constant:
+	// 		// in this case, it can be push down
+	// 		// condsToPush = append(condsToPush, v)
+	// 		// ret = append(ret, v)
+	// 	case *expression.ScalarFunction:
+	// 		col := expression.ExtractColumns(v) // the column involved
+	// 		var ok bool = true 
+	// 		for _, c := range col{
+	// 			if !columns.Contains(c){ // check whether in Groupby columns
+	// 				ok = false // if not, we can not push down
+	// 				break
+	// 			}
+	// 		}
+	// 		if ok{
+	// 			// ColumnSubstitute substitutes the columns in filter to expressions in select fields.
+	// 			// e.g. select * from (select b as a from t) k where a < 10 => select * from (select b as a from t where b < 10) k.
+	// 			// newFunc := expression.ColumnSubstitute(v, la.Schema(), exprsOriginal) // change the columns name
+
+	// 			condsToPush = append(condsToPush, v)
+	// 		}else{
+	// 			ret = append(ret, v)
+	// 		}
+	// 	default:
+	// 		ret = append(ret, v)
+	// 	}
+	// }
+
+	
+	// abstract real push down
+	// la.baseLogicalPlan.PredicatePushDown(condsToPush)
+
+	return ret, la
 }
 
 // PredicatePushDown implements LogicalPlan PredicatePushDown interface.

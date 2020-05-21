@@ -665,6 +665,8 @@ func pathsName(paths []*candidatePath) string {
 	return strings.Join(names, ",")
 }
 
+
+// test find_best_task.go
 func (s *testPlanSuite) TestSkylinePruning(c *C) {
 	defer testleak.AfterTest(c)()
 	tests := []struct {

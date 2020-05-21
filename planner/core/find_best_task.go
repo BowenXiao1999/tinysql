@@ -212,8 +212,74 @@ type candidatePath struct {
 // and there exists one factor that `x` is better than `y`, then `x` is better than `y`.
 func compareCandidates(lhs, rhs *candidatePath) int {
 	// TODO: implement the content according to the header comment.
+	setsResult, _ := compareColumnSet(lhs.columnSet, rhs.columnSet)
+
+	//===================
+	// if !comparable {
+	// 	return 0
+	// }
+
+	scanResult := Compare(lhs.isSingleScan, rhs.isSingleScan)
+	matchResult := Compare(lhs.isMatchProp, rhs.isMatchProp)
+	compare_score := setsResult + scanResult + matchResult
+	if setsResult >= 0 && scanResult >= 0 && matchResult >= 0 && compare_score > 0 {
+		// if column set is not bad
+		// if scan result is not bad
+		// if matchResult is not bad
+		// and the score is higher
+		return 1
+	}
+	if setsResult <= 0 && scanResult <= 0 && matchResult <= 0 && compare_score < 0 {
+		return -1
+	}
 	return 0
 }
+
+func Compare(b1, b2 bool) int{
+	var ret int
+	if b1 && b2{
+		ret = 0
+	}else if b1 && !b2{
+		ret = 1
+	}else if !b1 && b2{
+		ret = -1
+	}else{
+		ret = 0
+	}
+
+	return ret
+}
+
+// compareColumnSet will compares the two set. The last return value is used to indicate
+// if they are comparable, it is false when both two sets have columns that do not occur in the other.
+// When the second return value is true, the value of first:
+// (1) -1 means that `l` is a strict subset of `r`;
+// (2) 0 means that `l` equals to `r`;
+// (3) 1 means that `l` is a strict superset of `r`.
+func compareColumnSet(l, r *intsets.Sparse) (int, bool) {
+	lLen, rLen := l.Len(), r.Len()
+	if lLen < rLen {
+		// -1 is meaningful only when l.SubsetOf(r) is true.
+		return -1, l.SubsetOf(r)
+	}
+	if lLen == rLen {
+		// 0 is meaningful only when l.SubsetOf(r) is true.
+		return 0, l.SubsetOf(r)
+	}
+	// 1 is meaningful only when r.SubsetOf(l) is true.
+	return 1, r.SubsetOf(l)
+}
+
+func compareBool(l, r bool) int {
+	if l == r {
+		return 0
+	}
+	if !l {
+		return -1
+	}
+	return 1
+}
+
 
 func (ds *DataSource) getTableCandidate(path *util.AccessPath, prop *property.PhysicalProperty) *candidatePath {
 	candidate := &candidatePath{path: path}
@@ -249,15 +315,21 @@ func (ds *DataSource) getIndexCandidate(path *util.AccessPath, prop *property.Ph
 // skylinePruning prunes access paths according to different factors. An access path can be pruned only if
 // there exists a path that is not worse than it at all factors and there is at least one better factor.
 func (ds *DataSource) skylinePruning(prop *property.PhysicalProperty) []*candidatePath {
-	candidates := make([]*candidatePath, 0, 4)
-	for _, path := range ds.possibleAccessPaths {
+	candidates := make([]*candidatePath, 0, 4) // **** result set
+
+	for _, path := range ds.possibleAccessPaths { // **** scan through each path
+
 		// if we already know the range of the scan is empty, just return a TableDual
 		if len(path.Ranges) == 0 {
 			return []*candidatePath{{path: path}}
 		}
+
 		var currentCandidate *candidatePath
 		if path.IsTablePath {
+
+			/*table candidate or index candidate?*/
 			currentCandidate = ds.getTableCandidate(path, prop)
+
 		} else {
 			coveredByIdx := isCoveringIndex(ds.schema.Columns, path.FullIdxCols, path.FullIdxColLens, ds.tableInfo.PKIsHandle)
 			if len(path.AccessConds) > 0 || !prop.IsEmpty() || path.Forced || coveredByIdx {
@@ -271,10 +343,26 @@ func (ds *DataSource) skylinePruning(prop *property.PhysicalProperty) []*candida
 				continue
 			}
 		}
+
+		// NEW ADDED
 		// TODO: Here is the pruning phase. Will prune the access path which is must worse than others.
 		//       You'll need to implement the content in function `compareCandidates`.
 		//       And use it to prune unnecessary paths.
-		candidates = append(candidates, currentCandidate)
+		ok := true
+		for i := 0; i < len(candidates); i++ {
+
+			result := compareCandidates(candidates[i], currentCandidate)
+			if result == 1 {
+				ok = false
+				// We can break here because the current candidate cannot prune others anymore.
+				break
+			} else if result == -1 {
+				candidates = append(candidates[:i], candidates[i+1:]...) // drop the candidate
+			}
+		}
+		if ok {
+			candidates = append(candidates, currentCandidate)
+		}
 	}
 	return candidates
 }

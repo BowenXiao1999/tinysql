@@ -139,7 +139,7 @@ func SampleCollectorFromProto(collector *tipb.SampleCollector) *SampleCollector 
 	}
 	return s
 }
-
+// 收集直方图需要的信息
 func (c *SampleCollector) collect(sc *stmtctx.StatementContext, d types.Datum) error {
 	if !c.IsMerger {
 		if d.IsNull() {

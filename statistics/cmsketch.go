@@ -22,19 +22,23 @@ import (
 	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tipb/go-tipb"
 	"github.com/spaolacci/murmur3"
+
+	"sort"
 )
 
 // CMSketch is used to estimate point queries.
 // Refer: https://en.wikipedia.org/wiki/Count-min_sketch
 type CMSketch struct {
-	depth int32
-	width int32
-	count uint64
+	depth int32 // cols number
+	width int32 // rows number
+	count uint64 // 总共的插入值的数量
 	table [][]uint32
 }
 
 // NewCMSketch returns a new CM sketch.
 func NewCMSketch(d, w int32) *CMSketch {
+
+	// determine the dimension of table
 	tbl := make([][]uint32, d)
 	for i := range tbl {
 		tbl[i] = make([]uint32, w)
@@ -50,6 +54,22 @@ func (c *CMSketch) InsertBytes(bytes []byte) {
 // insertBytesByCount adds the bytes value into the TopN (if value already in TopN) or CM Sketch by delta, this does not updates c.defaultValue.
 func (c *CMSketch) insertBytesByCount(bytes []byte, count uint64) {
 	// TODO: implement the insert method.
+
+	// h1, h2 := murmur3.Sum128(bytes)
+	
+	// c.count += count
+	// for i := range c.table {
+	// 	j := (h1 + h2*uint64(i)) % uint64(c.width)
+	// 	c.table[i][j] += uint32(count)
+	// }
+
+	hash1, hash2 := murmur3.Sum128(bytes)
+	
+	c.count += count
+	for row, _ := range c.table {
+		col := (hash1 + hash2*uint64(row)) % uint64(len(c.table[0]))
+		c.table[row][col] += uint32(count)
+	}
 }
 
 func (c *CMSketch) queryValue(sc *stmtctx.StatementContext, val types.Datum) (uint64, error) {
@@ -68,7 +88,39 @@ func (c *CMSketch) QueryBytes(d []byte) uint64 {
 
 func (c *CMSketch) queryHashValue(h1, h2 uint64) uint64 {
 	// TODO: implement the query method.
-	return uint64(0)
+
+	// find the smallest value of each specific value in each column
+	vals := make([]uint32, c.depth)
+	// min := uint32(math.MaxUint32)
+	for row, _ := range c.table {
+		col := (h1 + h2*uint64(row)) % uint64(c.width)
+		// if min > c.table[i][j] {
+		// 	min = c.table[i][j]
+		// }
+		noise := (c.count - uint64(c.table[row][col])) / (uint64(c.width) - 1)
+		if uint64(c.table[row][col]) < noise {
+			vals[row] = 0
+		} else {
+			vals[row] = c.table[row][col] - uint32(noise)
+		}
+		// vals[row] = c.table[row][col] - uint32(noise)
+	}
+
+	// sort and locate median
+	sort.Slice(vals, func(i, j int) bool { return vals[i] < vals[j] })
+
+	// the median value of all rows
+	median_res := vals[(c.depth-1)/2] + (vals[c.depth/2]-vals[(c.depth-1)/2])/2
+
+
+	// if res > min {
+	// 	res = min
+	// }
+	// if c.considerDefVal(uint64(res)) {
+	// 	return c.defaultValue
+	// }
+
+	return uint64(median_res)
 }
 
 // MergeCMSketch merges two CM Sketch.
